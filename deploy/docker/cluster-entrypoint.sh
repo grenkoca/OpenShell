@@ -557,6 +557,23 @@ if [ "${USE_IPTABLES_LEGACY:-0}" = "1" ]; then
     EXTRA_KUBELET_ARGS="$EXTRA_KUBELET_ARGS --disable-network-policy"
 fi
 
+# ---------------------------------------------------------------------------
+# Detect rootless Docker (user namespace) and enable KubeletInUserNamespace
+# ---------------------------------------------------------------------------
+# When running inside rootless Docker the container is placed in a user
+# namespace: uid 0 inside maps to a non-zero host uid. In that environment
+# kubelet cannot open /dev/kmsg and the OOM watcher fails with:
+#   "Failed to create an oomWatcher (running in UserNS,
+#    Hint: enable KubeletInUserNamespace feature flag)"
+# Pass the feature gate so kubelet degrades gracefully instead of crashing.
+# Detection: /proc/self/uid_map column 2 is the host uid for the mapping
+# that starts at container uid 0.  It is 0 in rootful containers and
+# non-zero in rootless (user-namespace) containers.
+if awk 'NR==1 { exit ($2 != 0) ? 0 : 1 }' /proc/self/uid_map 2>/dev/null; then
+    echo "Detected user namespace (rootless Docker) — enabling KubeletInUserNamespace feature gate"
+    EXTRA_KUBELET_ARGS="$EXTRA_KUBELET_ARGS --kubelet-arg=feature-gates=KubeletInUserNamespace=true"
+fi
+
 # Docker Desktop can briefly start the container before its bridge default route
 # is fully installed. k3s exits immediately in that state, so wait briefly for
 # routing to settle first.
