@@ -1184,6 +1184,13 @@ enum SandboxCommands {
         #[arg(long, overrides_with = "auto_providers")]
         no_auto_providers: bool,
 
+        /// Kubernetes resource requests and limits for the sandbox container, as a JSON object.
+        ///
+        /// Maps directly to the container `resources` field in the pod spec.
+        /// Example: '{"limits":{"memory":"4Gi","ephemeral-storage":"20Gi"},"requests":{"memory":"2Gi","ephemeral-storage":"10Gi"}}'
+        #[arg(long, value_name = "JSON")]
+        resources: Option<String>,
+
         /// Command to run after "--" (defaults to an interactive shell).
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
@@ -2108,6 +2115,7 @@ async fn main() -> Result<()> {
                     no_bootstrap,
                     auto_providers,
                     no_auto_providers,
+                    resources,
                     command,
                 } => {
                     // Resolve --tty / --no-tty into an Option<bool> override.
@@ -2183,6 +2191,7 @@ async fn main() -> Result<()> {
                                 ssh_key.as_deref(),
                                 &providers,
                                 policy.as_deref(),
+                                resources.as_deref(),
                                 forward,
                                 &command,
                                 tty_override,
@@ -2205,6 +2214,7 @@ async fn main() -> Result<()> {
                                 ssh_key.as_deref(),
                                 &providers,
                                 policy.as_deref(),
+                                resources.as_deref(),
                                 forward,
                                 &command,
                                 tty_override,

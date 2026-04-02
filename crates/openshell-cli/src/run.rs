@@ -1837,6 +1837,47 @@ fn validate_ssh_host(host: &str) -> Result<()> {
 
 /// Create a sandbox when no gateway is configured.
 ///
+/// Converts a `serde_json::Value` into a `prost_types::Value`.
+fn json_value_to_proto_value(value: serde_json::Value) -> prost_types::Value {
+    use prost_types::value::Kind;
+    let kind = match value {
+        serde_json::Value::Null => Kind::NullValue(0),
+        serde_json::Value::Bool(b) => Kind::BoolValue(b),
+        serde_json::Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => Kind::StringValue(s),
+        serde_json::Value::Array(arr) => Kind::ListValue(prost_types::ListValue {
+            values: arr.into_iter().map(json_value_to_proto_value).collect(),
+        }),
+        serde_json::Value::Object(map) => Kind::StructValue(prost_types::Struct {
+            fields: map
+                .into_iter()
+                .map(|(k, v)| (k, json_value_to_proto_value(v)))
+                .collect(),
+        }),
+    };
+    prost_types::Value { kind: Some(kind) }
+}
+
+/// Parses a JSON string into a `prost_types::Struct` for use in `SandboxTemplate.resources`.
+///
+/// Returns an error if the input is not valid JSON or not a JSON object.
+fn parse_resources(json: &str) -> Result<prost_types::Struct> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .into_diagnostic()
+        .wrap_err("--resources must be valid JSON")?;
+    let serde_json::Value::Object(map) = value else {
+        return Err(miette::miette!(
+            "--resources must be a JSON object (e.g. {{\"limits\":{{\"ephemeral-storage\":\"20Gi\"}}}})"
+        ));
+    };
+    Ok(prost_types::Struct {
+        fields: map
+            .into_iter()
+            .map(|(k, v)| (k, json_value_to_proto_value(v)))
+            .collect(),
+    })
+}
+
 /// Bootstraps a new gateway first, then delegates to [`sandbox_create`].
 #[allow(clippy::too_many_arguments)]
 pub async fn sandbox_create_with_bootstrap(
@@ -1850,6 +1891,7 @@ pub async fn sandbox_create_with_bootstrap(
     ssh_key: Option<&str>,
     providers: &[String],
     policy: Option<&str>,
+    resources: Option<&str>,
     forward: Option<openshell_core::forward::ForwardSpec>,
     command: &[String],
     tty_override: Option<bool>,
@@ -1881,6 +1923,7 @@ pub async fn sandbox_create_with_bootstrap(
         ssh_key,
         providers,
         policy,
+        resources,
         forward,
         command,
         tty_override,
@@ -1936,6 +1979,7 @@ pub async fn sandbox_create(
     ssh_key: Option<&str>,
     providers: &[String],
     policy: Option<&str>,
+    resources: Option<&str>,
     forward: Option<openshell_core::forward::ForwardSpec>,
     command: &[String],
     tty_override: Option<bool>,
@@ -2029,10 +2073,17 @@ pub async fn sandbox_create(
 
     let policy = load_sandbox_policy(policy)?;
 
-    let template = image.map(|img| SandboxTemplate {
-        image: img,
-        ..SandboxTemplate::default()
-    });
+    let parsed_resources = resources.map(parse_resources).transpose()?;
+
+    let template = if image.is_some() || parsed_resources.is_some() {
+        Some(SandboxTemplate {
+            image: image.unwrap_or_default(),
+            resources: parsed_resources,
+            ..SandboxTemplate::default()
+        })
+    } else {
+        None
+    };
 
     let request = CreateSandboxRequest {
         spec: Some(SandboxSpec {
@@ -5016,9 +5067,10 @@ mod tests {
         GatewayControlTarget, TlsOptions, format_gateway_select_header,
         format_gateway_select_items, gateway_auth_label, gateway_select_with, gateway_type_label,
         git_sync_files, http_health_check, image_requests_gpu, inferred_provider_type,
-        parse_cli_setting_value, parse_credential_pairs, provisioning_timeout_message,
-        ready_false_condition_message, resolve_gateway_control_target_from, sandbox_should_persist,
-        shell_escape, source_requests_gpu, validate_gateway_name, validate_ssh_host,
+        parse_cli_setting_value, parse_credential_pairs, parse_resources,
+        provisioning_timeout_message, ready_false_condition_message,
+        resolve_gateway_control_target_from, sandbox_should_persist, shell_escape,
+        source_requests_gpu, validate_gateway_name, validate_ssh_host,
     };
     use crate::TEST_ENV_LOCK;
     use hyper::StatusCode;
@@ -5585,6 +5637,48 @@ mod tests {
         assert!(
             ssh_escaped.ends_with('\''),
             "should end with single-quote: {ssh_escaped}"
+        );
+    }
+
+    #[test]
+    fn parse_resources_accepts_limits_and_requests() {
+        let json =
+            r#"{"limits":{"memory":"4Gi","ephemeral-storage":"20Gi"},"requests":{"memory":"2Gi"}}"#;
+        let s = parse_resources(json).expect("should parse");
+        assert!(s.fields.contains_key("limits"));
+        assert!(s.fields.contains_key("requests"));
+    }
+
+    #[test]
+    fn parse_resources_accepts_empty_object() {
+        let s = parse_resources("{}").expect("should parse empty object");
+        assert!(s.fields.is_empty());
+    }
+
+    #[test]
+    fn parse_resources_rejects_invalid_json() {
+        let err = parse_resources("not json").expect_err("should fail");
+        assert!(
+            err.to_string().contains("valid JSON"),
+            "error should mention valid JSON: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_resources_rejects_non_object_json() {
+        let err = parse_resources(r#"["limits"]"#).expect_err("should fail for array");
+        assert!(
+            err.to_string().contains("JSON object"),
+            "error should mention JSON object: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_resources_rejects_string_json() {
+        let err = parse_resources(r#""20Gi""#).expect_err("should fail for string");
+        assert!(
+            err.to_string().contains("JSON object"),
+            "error should mention JSON object: {err}"
         );
     }
 }
